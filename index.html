@@ -242,7 +242,8 @@ def start_server(port=8000):
 if __name__ == "__main__":
     # 自动打开浏览器
     threading.Thread(
-        target=lambda: (time.sleep(1), webbrowser.open('http://localhost:8000')),
+        target=lambda: (time.sleep(1), webbrowser.open('zhu200701.github.io
+')),
         daemon=True
     ).start()
     start_server()
