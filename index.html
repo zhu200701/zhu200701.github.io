@@ -4,468 +4,211 @@ import webbrowser
 import threading
 import time
 import json
-from datetime import datetime
+import serial
+import serial.tools.list_ports
+from threading import Thread
 
-# ==================== 前端界面（真实数据驱动） ====================
-HTML_CONTENT = '''<!DOCTYPE html>
+class CarController:
+    def __init__(self):
+        self.port = None
+        self.is_connected = False
+        self.running = False
+
+    def connect(self):
+        try:
+            ports = serial.tools.list_ports.comports()
+            print("\n可用串口:")
+            for i, p in enumerate(ports):
+                print(f"  [{i}] {p.device} - {p.description}")
+
+            selected = 'COM4'
+            for p in ports:
+                if '传出' in p.description or 'Outgoing' in p.description:
+                    selected = p.device
+                    break
+
+            self.port = serial.Serial(port=selected, baudrate=9600, timeout=1, write_timeout=2)
+            self.is_connected = True
+            self.running = True
+            Thread(target=self._read, daemon=True).start()
+            print(f"✅ 连接成功: {selected}")
+            return True
+        except Exception as e:
+            print(f"❌ 连接失败: {e}")
+            return False
+
+    def _read(self):
+        while self.running and self.port and self.port.is_open:
+            try:
+                if self.port.in_waiting > 0:
+                    data = self.port.readline().decode('utf-8', errors='ignore').strip()
+                    if data:
+                        print(f"← {data}")
+                time.sleep(0.05)
+            except:
+                break
+
+    def send(self, cmd):
+        if not self.is_connected or not self.port:
+            return False
+        try:
+            self.port.write(cmd.encode('utf-8'))
+            print(f"→ {cmd}")
+            return True
+        except:
+            return False
+
+    def disconnect(self):
+        self.running = False
+        if self.port and self.port.is_open:
+            self.port.close()
+        self.is_connected = False
+        print("🔌 已断开")
+
+car = CarController()
+
+HTML = '''<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>智能小车遥控系统（真实数据版）</title>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { 
-            font-family: 'Segoe UI', sans-serif; 
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh; 
-            padding: 20px; 
-        }
-        .container { 
-            max-width: 900px; 
-            margin: 0 auto; 
-            background: white; 
-            border-radius: 20px; 
-            overflow: hidden; 
-            box-shadow: 0 20px 40px rgba(0,0,0,0.2); 
-        }
-        .header { 
-            background: linear-gradient(to right, #2c3e50, #4a6491); 
-            color: white; 
-            padding: 25px; 
-            text-align: center; 
-        }
-        .status-indicator { 
-            display: inline-block; 
-            width: 12px; 
-            height: 12px; 
-            border-radius: 50%; 
-            margin-right: 8px; 
-            background: #e74c3c; 
-        }
-        .connected { background: #2ecc71 !important; }
-        .direction-btn { 
-            width: 80px; 
-            height: 80px; 
-            font-size: 2rem; 
-            margin: 5px; 
-            border-radius: 12px; 
-            background: #3498db; 
-            color: white; 
-            border: none; 
-            cursor: pointer; 
-            transition: transform 0.2s;
-        }
-        .direction-btn:hover { transform: scale(1.05); }
-        .btn { 
-            padding: 12px; 
-            border: none; 
-            border-radius: 8px; 
-            cursor: pointer; 
-            font-weight: 600; 
-            flex: 1;
-        }
-        .connect-btn { background: #2ecc71; color: white; }
-        .disconnect-btn { background: #e74c3c; color: white; }
-        
-        /* 状态监控面板 */
-        .monitor-panel {
-            display: grid;
-            grid-template-columns: repeat(2, 1fr);
-            gap: 15px;
-            padding: 20px;
-            background: #f8f9fa;
-            border-radius: 15px;
-            margin: 20px;
-        }
-        .monitor-item {
-            background: white;
-            padding: 15px;
-            border-radius: 10px;
-            box-shadow: 0 4px 6px rgba(0,0,0,0.05);
-        }
-        .monitor-label {
-            font-size: 14px;
-            color: #666;
-            margin-bottom: 5px;
-        }
-        .monitor-value {
-            font-size: 24px;
-            font-weight: bold;
-            color: #2c3e50;
-        }
-        .signal-strength {
-            display: flex;
-            align-items: flex-end;
-            gap: 3px;
-            height: 30px;
-        }
-        .signal-bar {
-            width: 6px;
-            background: #3498db;
-            border-radius: 2px;
-            transition: height 0.3s;
-        }
-        
-        /* 命令历史面板 */
-        .history-panel {
-            margin: 20px;
-            background: #f8f9fa;
-            border-radius: 15px;
-            padding: 20px;
-            max-height: 300px;
-            overflow-y: auto;
-        }
-        .history-title {
-            font-size: 18px;
-            font-weight: bold;
-            margin-bottom: 15px;
-            color: #2c3e50;
-        }
-        .history-item {
-            background: white;
-            padding: 12px 15px;
-            margin-bottom: 10px;
-            border-radius: 8px;
-            border-left: 4px solid #3498db;
-            font-family: 'Courier New', monospace;
-            display: flex;
-            justify-content: space-between;
-            animation: fadeIn 0.3s ease;
-        }
-        .history-time {
-            color: #7f8c8d;
-            font-size: 12px;
-        }
-        @keyframes fadeIn {
-            from { opacity: 0; transform: translateY(-10px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
-        
-        .control-panel { padding: 20px; }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>智能小车控制器</title>
+<style>
+:root{--bg:#f4f1ed;--card:#fff;--text:#5a5550;--muted:#9b9490;--rose:#c4a7a0;--sage:#a8b5a0;--blue:#8fa7b8;--sand:#c9b99a;--clay:#b8967a;--shadow:rgba(90,85,80,.08)}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);min-height:100vh;padding:16px;color:var(--text)}
+.app{max-width:420px;margin:0 auto}
+.header{text-align:center;padding:24px 0 16px}
+.header h1{font-size:20px;font-weight:600;color:var(--text)}
+.header .sub{font-size:12px;color:var(--muted);margin-top:4px}
+.status-bar{display:flex;align-items:center;gap:8px;margin:12px 0;padding:12px 16px;background:var(--card);border-radius:12px;box-shadow:0 2px 8px var(--shadow)}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--rose);transition:.3s}
+.dot.on{background:var(--sage);box-shadow:0 0 6px var(--sage)}
+.card{background:var(--card);border-radius:14px;padding:16px;margin-bottom:12px;box-shadow:0 2px 8px var(--shadow)}
+.card-title{font-size:11px;text-transform:uppercase;letter-spacing:1px;color:var(--muted);margin-bottom:12px}
+.row{display:flex;gap:8px;margin-bottom:8px;justify-content:center}
+.btn{flex:1;max-width:120px;padding:14px 8px;border:none;border-radius:10px;font-size:13px;font-weight:600;cursor:pointer;transition:transform .1s,opacity .2s;color:#fff;text-align:center;-webkit-user-select:none;user-select:none}
+.btn:active{transform:scale(.93);opacity:.85}
+.btn-rose{background:var(--rose)}
+.btn-sage{background:var(--sage)}
+.btn-blue{background:var(--blue)}
+.btn-sand{background:var(--sand)}
+.btn-clay{background:var(--clay)}
+.btn-light{background:#e8e3de;color:var(--text)}
+.btn-wide{max-width:170px}
+.btn-sm{padding:10px 12px;font-size:12px;flex:none}
+.dpad{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;max-width:270px;margin:0 auto}
+.dpad .btn{max-width:none;padding:18px 6px;font-size:12px}
+.slider-wrap{padding:4px 0}
+.slider-wrap label{display:flex;justify-content:space-between;font-size:13px;margin-bottom:8px;color:var(--muted)}
+.slider-wrap .val{color:var(--clay);font-weight:700;font-size:18px}
+input[type=range]{width:100%;height:5px;-webkit-appearance:none;background:#e8e3de;border-radius:3px;outline:none}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:20px;height:20px;background:var(--clay);border-radius:50%;cursor:pointer;box-shadow:0 2px 6px rgba(184,150,122,.3)}
+.log{margin-top:8px;background:var(--card);border-radius:10px;padding:10px;max-height:80px;overflow-y:auto;font-family:monospace;font-size:11px;color:var(--muted);box-shadow:0 2px 8px var(--shadow)}
+.log div{padding:2px 0}
+</style>
 </head>
 <body>
-    <div class="container">
-        <div class="header">
-            <h1><i class="fas fa-car"></i> 智能小车遥控系统</h1>
-            <p>数据实时来自小车硬件，无模拟</p>
-            <div>
-                <span class="status-indicator" id="status-indicator"></span>
-                <span id="connection-status">未连接</span>
-            </div>
-        </div>
+<div class="app">
+<div class="header">
+<h1>智能小车控制器</h1>
+<div class="sub">蓝牙遥控 · 自动巡线</div>
+</div>
 
-        <div class="control-panel">
-            <!-- 方向控制 -->
-            <div style="text-align: center;">
-                <button class="direction-btn" id="forward-btn">
-                    <i class="fas fa-arrow-up"></i>
-                </button><br>
-                <button class="direction-btn" id="left-btn">
-                    <i class="fas fa-arrow-left"></i>
-                </button>
-                <button class="direction-btn" id="stop-btn" style="background:#e74c3c;">
-                    <i class="fas fa-stop"></i>
-                </button>
-                <button class="direction-btn" id="right-btn">
-                    <i class="fas fa-arrow-right"></i>
-                </button><br>
-                <button class="direction-btn" id="backward-btn">
-                    <i class="fas fa-arrow-down"></i>
-                </button>
-            </div>
+<div class="status-bar">
+<div class="dot" id="dot"></div>
+<span style="font-size:13px;color:var(--muted)" id="stxt">未连接</span>
+<button class="btn btn-sage btn-sm" onclick="conn()" style="margin-left:auto">连接</button>
+<button class="btn btn-light btn-sm" onclick="disc()">断开</button>
+</div>
 
-            <!-- 连接控制 -->
-            <div style="margin-top: 20px; display: flex; gap: 10px;">
-                <button class="btn connect-btn" id="connect-btn">
-                    🔗 连接小车（真实数据）
-                </button>
-                <button class="btn disconnect-btn" id="disconnect-btn" disabled>
-                    ❌ 断开连接
-                </button>
-            </div>
+<div class="card">
+<div class="card-title">模式</div>
+<div class="row">
+<button class="btn btn-clay btn-wide" onclick="s('1')">遥控模式</button>
+<button class="btn btn-sage btn-wide" onclick="s('2')">巡线模式</button>
+</div>
+</div>
 
-            <!-- 状态监控面板 -->
-            <div class="monitor-panel">
-                <div class="monitor-item">
-                    <div class="monitor-label">连接状态</div>
-                    <div class="monitor-value" id="monitor-connection">
-                        <span class="status-indicator" id="monitor-indicator"></span>
-                        <span>未连接</span>
-                    </div>
-                </div>
-                <div class="monitor-item">
-                    <div class="monitor-label">小车状态</div>
-                    <div class="monitor-value" id="monitor-car-status">--</div>
-                </div>
-                <div class="monitor-item">
-                    <div class="monitor-label">电池电量</div>
-                    <div class="monitor-value" id="monitor-battery">--%</div>
-                </div>
-                <div class="monitor-item">
-                    <div class="monitor-label">信号强度(RSSI)</div>
-                    <div class="signal-strength" id="monitor-signal">
-                        <!-- 信号条由真实RSSI计算 -->
-                    </div>
-                </div>
-            </div>
+<div class="card">
+<div class="card-title">方向控制（按住移动，松开停止）</div>
+<div class="dpad">
+<button class="btn btn-sand" onmousedown="s('Q')" onmouseup="s('S')" ontouchstart="s('Q')" ontouchend="s('S')">左旋</button>
+<button class="btn btn-blue" onmousedown="s('F')" onmouseup="s('S')" ontouchstart="s('F')" ontouchend="s('S')">前进</button>
+<button class="btn btn-sand" onmousedown="s('E')" onmouseup="s('S')" ontouchstart="s('E')" ontouchend="s('S')">右旋</button>
+<button class="btn btn-blue" onmousedown="s('L')" onmouseup="s('S')" ontouchstart="s('L')" ontouchend="s('S')">左转</button>
+<button class="btn btn-rose" onclick="s('S')">停止</button>
+<button class="btn btn-blue" onmousedown="s('R')" onmouseup="s('S')" ontouchstart="s('R')" ontouchend="s('S')">右转</button>
+<button class="btn btn-sand" onmousedown="s('Q')" onmouseup="s('S')" ontouchstart="s('Q')" ontouchend="s('S')">逆时针</button>
+<button class="btn btn-blue" onmousedown="s('B')" onmouseup="s('S')" ontouchstart="s('B')" ontouchend="s('S')">后退</button>
+<button class="btn btn-sand" onmousedown="s('E')" onmouseup="s('S')" ontouchstart="s('E')" ontouchend="s('S')">顺时针</button>
+</div>
+</div>
 
-            <!-- 命令历史面板 -->
-            <div class="history-panel">
-                <div class="history-title">
-                    <i class="fas fa-history"></i> 命令历史（含设备响应）
-                </div>
-                <div id="history-list"></div>
-            </div>
-        </div>
-    </div>
+<div class="card">
+<div class="card-title">速度</div>
+<div class="slider-wrap">
+<label><span>当前速度</span><span class="val" id="sv">50</span></label>
+<input type="range" min="20" max="100" step="10" value="50" id="sl" oninput="spd(this.value)">
+</div>
+</div>
 
-    <script>
-        // ==================== 真实数据变量 ====================
-        let bluetoothDevice = null;
-        let gattServer = null;
-        let isConnected = false;
-        let commandHistory = [];
-        
-        // 蓝牙特征对象（需替换为你的设备UUID）
-        let controlCharacteristic = null; // 发送控制命令的特征
-        let statusCharacteristic = null;  // 接收状态更新的特征（电池、运动、信号）
-        
-        // ==================== 真实数据获取函数 ====================
-        // 连接蓝牙设备（真实硬件）
-        async function connectBluetooth() {
-            try {
-                // ⚠️ 替换为你的小车真实服务UUID（示例：0xFFE0是常见串口服务）
-                bluetoothDevice = await navigator.bluetooth.requestDevice({
-                    filters: [{ services: ['0000ffe1-0000-1000-8000-00805f9b34fb'] }],
-                    optionalServices: ['0000ffe1-0000-1000-8000-00805f9b34fb']
-                });
+<div class="log" id="lg"></div>
+</div>
 
-                gattServer = await bluetoothDevice.gatt.connect();
-                console.log("✅ 已连接GATT服务器（真实硬件）");
-
-                // 获取控制特征（用于发送命令）
-                const service = await gattServer.getPrimaryService('0000ffe1-0000-1000-8000-00805f9b34fb');
-                controlCharacteristic = await service.getCharacteristic('0000ffe1-0000-1000-8000-00805f9b34fb');
-                
-                // 获取状态特征（用于接收真实数据）
-                statusCharacteristic = await service.getCharacteristic('0000ffe2-0000-1000-8000-00805f9b34fb');
-                
-                // 订阅状态通知（设备主动推送数据）
-                await statusCharacteristic.startNotifications();
-                statusCharacteristic.addEventListener('characteristicvaluechanged', handleStatusUpdate);
-                
-                isConnected = true;
-                updateConnectionUI(true);
-                
-                // 监听断开
-                bluetoothDevice.addEventListener('gattserverdisconnected', () => {
-                    isConnected = false;
-                    updateConnectionUI(false);
-                    alert("🔌 蓝牙已断开（真实硬件）");
-                });
-
-            } catch (error) {
-                console.error("❌ 连接失败:", error);
-                alert("请确认小车已开机并处于配对模式！");
-            }
-        }
-
-        // 处理设备推送的真实状态数据
-        function handleStatusUpdate(event) {
-            const value = event.target.value;
-            const decoder = new TextDecoder('utf-8');
-            const data = JSON.parse(decoder.decode(value)); // 假设设备返回JSON格式
-            
-            // 更新真实数据到监控面板
-            document.getElementById('monitor-car-status').textContent = data.status || '--';
-            document.getElementById('monitor-battery').textContent = `${data.battery}%`;
-            
-            // 计算信号强度（RSSI，单位dBm）
-            const rssi = data.rssi || -70; // 示例：-70dBm是强信号
-            updateSignalBars(rssi);
-            
-            // 记录设备响应到历史
-            addToHistory(`设备响应: ${data.status} | 电量:${data.battery}%`, 'response');
-        }
-
-        // 发送控制命令（真实写入设备）
-        async function sendCommand(command) {
-            if (!isConnected || !controlCharacteristic) {
-                alert("❌ 请先连接真实小车！");
-                return;
-            }
-            
-            try {
-                // 构造命令（需与小车协议一致）
-                const commandData = JSON.stringify({ cmd: command, ts: Date.now() });
-                const encoder = new TextEncoder();
-                await controlCharacteristic.writeValue(encoder.encode(commandData));
-                
-                // 记录发送的命令到历史
-                addToHistory(`发送: ${command}`, 'command');
-                
-            } catch (error) {
-                console.error("❌ 命令发送失败:", error);
-                alert("命令发送失败，请检查设备连接！");
-            }
-        }
-
-        // ==================== 辅助函数 ====================
-        // 更新连接UI
-        function updateConnectionUI(connected) {
-            const indicator = document.getElementById('status-indicator');
-            const statusText = document.getElementById('connection-status');
-            const monitorIndicator = document.getElementById('monitor-indicator');
-            const monitorConnection = document.getElementById('monitor-connection');
-            const connectBtn = document.getElementById('connect-btn');
-            const disconnectBtn = document.getElementById('disconnect-btn');
-            
-            if (connected) {
-                indicator.classList.add('connected');
-                statusText.textContent = '已连接（真实硬件）';
-                monitorIndicator.classList.add('connected');
-                monitorConnection.innerHTML = '<span class="status-indicator connected"></span><span>已连接</span>';
-                connectBtn.disabled = true;
-                disconnectBtn.disabled = false;
-            } else {
-                indicator.classList.remove('connected');
-                statusText.textContent = '未连接';
-                monitorIndicator.classList.remove('connected');
-                monitorConnection.innerHTML = '<span class="status-indicator"></span><span>未连接</span>';
-                connectBtn.disabled = false;
-                disconnectBtn.disabled = true;
-                
-                // 清空状态显示
-                document.getElementById('monitor-car-status').textContent = '--';
-                document.getElementById('monitor-battery').textContent = '--%';
-                document.getElementById('monitor-signal').innerHTML = '';
-            }
-        }
-
-        // 更新信号条（真实RSSI转换）
-        function updateSignalBars(rssi) {
-            const container = document.getElementById('monitor-signal');
-            container.innerHTML = '';
-            
-            // RSSI范围：-30（极强）到 -90（极弱）
-            const strength = Math.min(4, Math.max(1, Math.floor((rssi + 90) / 15)));
-            
-            for (let i = 1; i <= 4; i++) {
-                const bar = document.createElement('div');
-                bar.className = 'signal-bar';
-                bar.style.height = `${i * 7}px`;
-                bar.style.opacity = i <= strength ? '1' : '0.3';
-                container.appendChild(bar);
-            }
-        }
-
-        // 添加历史记录（区分命令和设备响应）
-        function addToHistory(content, type) {
-            const timestamp = new Date().toLocaleTimeString('zh-CN', { hour12: false });
-            const item = {
-                time: timestamp,
-                content: content,
-                type: type // 'command' 或 'response'
-            };
-            
-            commandHistory.unshift(item);
-            if (commandHistory.length > 15) commandHistory.pop();
-            
-            updateHistoryDisplay();
-        }
-
-        // 更新历史显示
-        function updateHistoryDisplay() {
-            const list = document.getElementById('history-list');
-            list.innerHTML = '';
-            
-            commandHistory.forEach(item => {
-                const div = document.createElement('div');
-                div.className = 'history-item';
-                div.innerHTML = `
-                    <span>${item.content}</span>
-                    <span class="history-time">${item.time} [${item.type}]</span>
-                `;
-                list.appendChild(div);
-            });
-        }
-
-        // 断开连接
-        function disconnectBluetooth() {
-            if (bluetoothDevice?.gatt.connected) {
-                bluetoothDevice.gatt.disconnect();
-            }
-        }
-
-        // 键盘控制（真实命令）
-        document.addEventListener('keydown', (e) => {
-            if (!isConnected) return;
-            switch(e.key) {
-                case 'w': case 'W': case 'ArrowUp': sendCommand('forward'); break;
-                case 's': case 'S': case 'ArrowDown': sendCommand('backward'); break;
-                case 'a': case 'A': case 'ArrowLeft': sendCommand('left'); break;
-                case 'd': case 'D': case 'ArrowRight': sendCommand('right'); break;
-                case ' ': sendCommand('stop'); break;
-            }
-        });
-
-        // 按钮事件绑定
-        document.getElementById('connect-btn').addEventListener('click', connectBluetooth);
-        document.getElementById('disconnect-btn').addEventListener('click', disconnectBluetooth);
-        document.getElementById('forward-btn').addEventListener('click', () => sendCommand('forward'));
-        document.getElementById('backward-btn').addEventListener('click', () => sendCommand('backward'));
-        document.getElementById('left-btn').addEventListener('click', () => sendCommand('left'));
-        document.getElementById('right-btn').addEventListener('click', () => sendCommand('right'));
-        document.getElementById('stop-btn').addEventListener('click', () => sendCommand('stop'));
-
-        // 初始化
-        updateConnectionUI(false);
-        updateHistoryDisplay();
-    </script>
+<script>
+let ok=false,cs=50;
+function lg(m){const d=document.getElementById('lg');d.innerHTML='<div>'+new Date().toLocaleTimeString()+' '+m+'</div>'+d.innerHTML;if(d.children.length>20)d.lastChild.remove()}
+async function conn(){try{const r=await(await fetch('/api/connect',{method:'POST'})).json();if(r.ok){ok=true;document.getElementById('dot').classList.add('on');document.getElementById('stxt').textContent='已连接';lg('连接成功')}else{lg('连接失败（小车是否开机？）')}}catch(e){lg('错误')}}
+async function disc(){try{await fetch('/api/disconnect',{method:'POST'});ok=false;document.getElementById('dot').classList.remove('on');document.getElementById('stxt').textContent='未连接';lg('已断开')}catch(e){}}
+async function s(c){if(!ok){lg('未连接');return}try{await fetch('/api/command',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({command:c})})}catch(e){}}
+function spd(v){document.getElementById('sv').textContent=v;const t=parseInt(v),d=t-cs,n=Math.abs(d)/10,ch=d>0?'+':'-';for(let i=0;i<n;i++)s(ch);cs=t}
+document.addEventListener('keydown',e=>{if(!ok)return;const m={'w':'F','W':'F','ArrowUp':'F','s':'B','ArrowDown':'B','a':'L','A':'L','ArrowLeft':'L','d':'R','D':'R','ArrowRight':'R','q':'Q','Q':'Q','e':'E','E':'E',' ':'S'};if(m[e.key]){e.preventDefault();s(m[e.key])}})
+document.addEventListener('keyup',e=>{if(!ok)return;if(['w','W','a','A','s','d','D','q','Q','e','E','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.key))s('S')})
+</script>
 </body>
 </html>'''
 
-# ==================== 后端服务器（无模拟逻辑） ====================
-class CarControlHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
+class Handler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
         if self.path == '/':
             self.send_response(200)
             self.send_header('Content-type', 'text/html; charset=utf-8')
             self.end_headers()
-            self.wfile.write(HTML_CONTENT.encode('utf-8'))
-        
-        elif self.path == '/api/status':
-            self.send_response(200)
-            self.send_header('Content-type', 'application/json')
-            self.end_headers()
-            # 后端不存储状态，全部由前端从设备实时获取
-            status = {
-                "connected": False,
-                "message": "状态由前端实时从设备获取",
-                "timestamp": datetime.now().isoformat()
-            }
-            self.wfile.write(json.dumps(status).encode('utf-8'))
-        
+            self.wfile.write(HTML.encode('utf-8'))
         else:
             self.send_response(404)
             self.end_headers()
-            self.wfile.write(b'404 Not Found')
-def start_server(port=8000):
-    with socketserver.TCPServer(("", port), CarControlHTTPRequestHandler) as httpd:
-        print(f"🚀 真实数据版服务器启动: http://localhost:{port}")
-        print("✅ 所有状态数据均来自真实蓝牙设备，无模拟")
-        print("⚠️ 请替换代码中的UUID为你的小车真实服务/特征ID")
-        try:
-            httpd.serve_forever()
-        except KeyboardInterrupt:
-            print("\n🛑 服务器已停止")
+
+    def do_POST(self):
+        if self.path == '/api/connect':
+            self._json({'ok': car.connect()})
+        elif self.path == '/api/disconnect':
+            car.disconnect()
+            self._json({'ok': True})
+        elif self.path == '/api/command':
+            data = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+            self._json({'ok': car.send(data.get('command', ''))})
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def _json(self, obj):
+        self.send_response(200)
+        self.send_header('Content-type', 'application/json')
+        self.end_headers()
+        self.wfile.write(json.dumps(obj).encode('utf-8'))
+
+    def log_message(self, f, *a):
+        print(f"[HTTP] {self.command} {self.path}")
+
 if __name__ == "__main__":
-    threading.Thread(
-        target=lambda: (time.sleep(1), webbrowser.open('zhu200701.github.io
-')),
-        daemon=True
-    ).start()
-    start_server()
+    PORT = 8000
+    threading.Thread(target=lambda: (time.sleep(1), webbrowser.open(f'http://localhost:{PORT}')), daemon=True).start()
+    print(f"🚀 服务器已启动: http://localhost:{PORT}")
+    print("📱 在浏览器中操控小车")
+    with socketserver.TCPServer(("", PORT), Handler) as h:
+        try:
+            h.serve_forever()
+        except KeyboardInterrupt:
+            print("\n已停止")
